@@ -1,0 +1,437 @@
+# models.py
+from django.db import models
+from django.contrib.auth.models import AbstractUser
+
+class User(AbstractUser):
+    subscriptions = models.ManyToManyField('self', symmetrical=False, related_name='subscribers')
+
+class Post(models.Model):
+    title = models.CharField(max_length=200)
+    body = models.TextField()
+    author = models.ForeignKey(User, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_public = models.BooleanField(default=True)
+    tags = models.ManyToManyField('Tag')
+
+class Comment(models.Model):
+    post = models.ForeignKey(Post, on_delete=models.CASCADE)
+    author = models.ForeignKey(User, on_delete=models.CASCADE) 
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+class Tag(models.Model):
+    name = models.CharField(max_length=50)
+
+# serializers.py 
+from rest_framework import serializers
+from .models import Post, Comment, User
+
+class PostSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Post
+        fields = ['id', 'title', 'body', 'author', 'created_at', 'is_public', 'tags']
+        
+class CommentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Comment
+        fields = ['id', 'post', 'author', 'body', 'created_at']
+        
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'subscriptions']
+
+# views.py
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from .models import Post, Comment, User
+from .serializers import PostSerializer, CommentSerializer, UserSerializer
+
+class PostViewSet(viewsets.ModelViewSet):
+    queryset = Post.objects.all()
+    serializer_class = PostSerializer
+    
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+        
+    def get_queryset(self):
+        if self.action == 'list':
+            if self.request.user.is_authenticated:
+                subscriptions = self.request.user.subscriptions.all()
+                return Post.objects.filter(author__in=subscriptions, is_public=True)
+            else:
+                return Post.objects.filter(is_public=True)  
+        else:
+            return Post.objects.all()
+
+    @action(detail=False)
+    def tag(self, request):
+        tag = request.query_params.get('tag', None)
+        if tag is not None:
+            posts = Post.objects.filter(tags__name=tag)
+            serializer = self.get_serializer(posts, many=True)
+            return Response(serializer.data)
+        else:
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def request_access(self, request, pk=None):
+        post = self.get_object()
+        if not post.is_public and post.author != request.user:
+            # send access request notification to post author
+            return Response(status=status.HTTP_200_OK)
+        else:
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+            
+class CommentViewSet(viewsets.ModelViewSet):
+    queryset = Comment.objects.all()
+    serializer_class = CommentSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+        
+class UserViewSet(viewsets.ModelViewSet):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+
+    @action(detail=True, methods=['post'])  
+    def subscribe(self, request, pk=None):
+        user = self.get_object()
+        if user != request.user:
+            if user in request.user.subscriptions.all():
+                request.user.subscriptions.remove(user)
+            else:
+                request.user.subscriptions.add(user)
+            return Response(status=status.HTTP_200_OK)
+        else:  
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+# urls.py
+from django.urls import include, path
+from rest_framework import routers
+from . import views
+
+router = routers.DefaultRouter()
+router.register(r'posts', views.PostViewSet)
+router.register(r'comments', views.CommentViewSet)
+router.register(r'users', views.UserViewSet)
+
+urlpatterns = [
+    path('', include(router.urls)),
+    path('auth/', include('djoser.urls')),
+    path('auth/', include('djoser.urls.jwt')),
+]
+
+// App.js
+import React from 'react';
+import { BrowserRouter as Router, Route } from 'react-router-dom';
+import Login from './components/Login';
+import Register from './components/Register';
+import Posts from './components/Posts';
+import Profile from './components/Profile';
+import CreatePost from './components/CreatePost';
+import EditPost from './components/EditPost';
+
+function App() {
+  return (
+    <Router>
+      <div>
+        <Route exact path="/" component={Posts} />
+        <Route path="/login" component={Login} /> 
+        <Route path="/register" component={Register} />
+        <Route path="/profile/:userId" component={Profile} />
+        <Route path="/create-post" component={CreatePost} />
+        <Route path="/edit-post/:postId" component={EditPost} />
+      </div>
+    </Router>
+  );
+}
+
+export default App;
+
+// Login.js
+import React, { useState } from 'react';
+import axios from 'axios';
+
+function Login() {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    axios.post('/auth/jwt/create/', { username, password })
+      .then(res => {
+        localStorage.setItem('token', res.data.access);
+      })
+      .catch(err => console.log(err));
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input 
+        type="text"
+        placeholder="Username"
+        value={username}
+        onChange={e => setUsername(e.target.value)} 
+      />
+      <input
+        type="password" 
+        placeholder="Password"
+        value={password}
+        onChange={e => setPassword(e.target.value)}
+      />
+      <button type="submit">Login</button>
+    </form>
+  );
+}
+
+export default Login;
+
+// Register.js 
+import React, { useState } from 'react';
+import axios from 'axios';
+
+function Register() {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+
+  const handleSubmit = (e) => {  
+    e.preventDefault();
+    axios.post('/auth/users/', { username, password })
+      .then(res => console.log(res))
+      .catch(err => console.log(err));
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        type="text" 
+        placeholder="Username"
+        value={username}
+        onChange={e => setUsername(e.target.value)}
+      />
+      <input 
+        type="password"
+        placeholder="Password" 
+        value={password}
+        onChange={e => setPassword(e.target.value)}
+      />
+      <button type="submit">Register</button>
+    </form>
+  );
+}
+
+export default Register;
+
+// Posts.js
+import React, { useState, useEffect } from 'react'; 
+import axios from 'axios';
+import { Link } from 'react-router-dom';
+
+function Posts() {
+  const [posts, setPosts] = useState([]);
+  const [selectedTag, setSelectedTag] = useState('');
+
+  useEffect(() => {
+    axios.get('/api/posts/', {
+      params: { tag: selectedTag },
+      headers: { 'Authorization': `JWT ${localStorage.getItem('token')}` }
+    })
+      .then(res => setPosts(res.data))
+      .catch(err => console.log(err));
+  }, [selectedTag]);
+
+  return (
+    <div>
+      <input
+        type="text" 
+        placeholder="Search by tag"
+        value={selectedTag}
+        onChange={e => setSelectedTag(e.target.value)}  
+      />
+      {posts.map(post => (
+        <div key={post.id}>
+          <Link to={`/posts/${post.id}`}>{post.title}</Link>
+          <p>Author: {post.author.username}</p>
+          <p>Tags: {post.tags.map(tag => tag.name).join(', ')}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default Posts;
+
+// Profile.js
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Link } from 'react-router-dom';
+
+function Profile({ match }) {
+  const [user, setUser] = useState({});
+  const [posts, setPosts] = useState([]);
+  const [isSubscribed, setIsSubscribed] = useState(false);
+
+  useEffect(() => {
+    axios.get(`/api/users/${match.params.userId}`)
+      .then(res => {
+        setUser(res.data);
+        setIsSubscribed(res.data.subscriptions.includes(parseInt(localStorage.getItem('userId'))));
+      })
+      .catch(err => console.log(err));
+
+    axios.get(`/api/posts?author=${match.params.userId}`) 
+      .then(res => setPosts(res.data))
+      .catch(err => console.log(err));
+  }, [match.params.userId]);
+
+  const handleSubscribe = () => {
+    axios.post(`/api/users/${user.id}/subscribe/`, null, {
+      headers: { 'Authorization': `JWT ${localStorage.getItem('token')}` }
+    })
+      .then(() => setIsSubscribed(!isSubscribed))
+      .catch(err => console.log(err));
+  };
+
+  return (
+    <div>
+      <h1>{user.username}</h1>
+      <button onClick={handleSubscribe}>{isSubscribed ? 'Unsubscribe' : 'Subscribe'}</button>
+      <h2>Posts:</h2>
+      {posts.map(post => (
+        <div key={post.id}>
+          <Link to={`/posts/${post.id}`}>{post.title}</Link>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default Profile;
+
+// CreatePost.js
+import React, { useState } from 'react';
+import axios from 'axios';
+import { useHistory } from 'react-router-dom';
+
+function CreatePost() {
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [isPublic, setIsPublic] = useState(true);
+  const [tags, setTags] = useState([]);
+  const history = useHistory();
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const postData = { title, body, is_public: isPublic, tags };
+    axios.post('/api/posts/', postData, {
+      headers: { 'Authorization': `JWT ${localStorage.getItem('token')}` }
+    })
+      .then(res => history.push(`/posts/${res.data.id}`))
+      .catch(err => console.log(err));
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        type="text"
+        placeholder="Title" 
+        value={title}
+        onChange={e => setTitle(e.target.value)}
+      />
+      <textarea 
+        placeholder="Body"
+        value={body}  
+        onChange={e => setBody(e.target.value)}
+      ></textarea>
+      <input 
+        type="checkbox"
+        checked={isPublic}
+        onChange={e => setIsPublic(e.target.checked)} 
+      />
+      <input
+        type="text" 
+        placeholder="Tags"
+        value={tags}
+        onChange={e => setTags(e.target.value.split(','))} 
+      />
+      <button type="submit">Create Post</button>
+    </form>
+  );
+}
+
+export default CreatePost;
+
+// EditPost.js
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { useHistory } from 'react-router-dom';
+
+function EditPost({ match }) {
+  const [post, setPost] = useState({ title: '', body: '', is_public: true, tags: [] });
+  const history = useHistory();
+
+  useEffect(() => {
+    axios.get(`/api/posts/${match.params.postId}`)
+      .then(res => setPost(res.data))
+      .catch(err => console.log(err));
+  }, [match.params.postId]);
+
+  const handleChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    const newValue = type === 'checkbox' ? checked : value;
+    setPost({ ...post, [name]: newValue });
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    axios.put(`/api/posts/${post.id}/`, post, {
+      headers: { 'Authorization': `JWT ${localStorage.getItem('token')}` }
+    })
+      .then(() => history.push(`/posts/${post.id}`))
+      .catch(err => console.log(err));
+  };
+
+  const handleDelete = () => {
+    axios.delete(`/api/posts/${post.id}/`, {
+      headers: { 'Authorization': `JWT ${localStorage.getItem('token')}` }  
+    })
+      .then(() => history.push('/'))
+      .catch(err => console.log(err));
+  };
+
+  return (
+    <div>
+      <form onSubmit={handleSubmit}>
+        <input 
+          type="text"
+          name="title"
+          value={post.title}
+          onChange={handleChange}
+        />
+        <textarea
+          name="body"
+          value={post.body}
+          onChange={handleChange}  
+        ></textarea>
+        <input
+          type="checkbox"
+          name="is_public" 
+          checked={post.is_public}
+          onChange={handleChange}
+        />
+        <input 
+          type="text"
+          name="tags"
+          value={post.tags.map(tag => tag.name).join(', ')}
+          onChange={e => handleChange({ target: { name: 'tags', value: e.target.value.split(',') } })}
+        />
+        <button type="submit">Update Post</button>
+      </form>
+      <button onClick={handleDelete}>Delete Post</button>
+    </div>
+  );  
+}
+
+export default EditPost;
