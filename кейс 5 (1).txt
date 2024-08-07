@@ -1,0 +1,947 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const passport = require('passport');
+const cloudinary = require('cloudinary').v2;
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(express.json());
+app.use(passport.initialize());
+
+// Passport config
+require('./config/passport')(passport);
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error(err));
+
+// Cloudinary config
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Routes
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/trips', require('./routes/trips'));
+
+app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+javascriptCopy// User.js
+const mongoose = require('mongoose');
+
+const UserSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+  },
+  password: {
+    type: String,
+    required: true,
+  },
+  name: {
+    type: String,
+    required: true,
+  },
+});
+
+module.exports = mongoose.model('User', UserSchema);
+
+// Trip.js
+const mongoose = require('mongoose');
+
+const TripSchema = new mongoose.Schema({
+  title: {
+    type: String,
+    required: true,
+  },
+  description: {
+    type: String,
+    required: true,
+  },
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  startDate: {
+    type: Date,
+    required: true,
+  },
+  endDate: {
+    type: Date,
+    required: true,
+  },
+  locations: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Location',
+  }],
+  images: [{
+    url: String,
+    publicId: String,
+  }],
+  cost: {
+    type: Number,
+    required: true,
+  },
+  rating: {
+    type: Number,
+    required: true,
+  },
+});
+
+module.exports = mongoose.model('Trip', TripSchema);
+
+// Location.js
+const mongoose = require('mongoose');
+
+const LocationSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+  },
+  description: {
+    type: String,
+    required: true,
+  },
+  coordinates: {
+    type: [Number],
+    required: true,
+  },
+  heritage: {
+    type: Boolean,
+    default: false,
+  },
+  attractions: [String],
+});
+
+module.exports = mongoose.model('Location', LocationSchema);
+// auth.js
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const passport = require('passport');
+const User = require('../models/User');
+
+const router = express.Router();
+
+// Register
+router.post('/register', async (req, res) => {
+  const { email, password, name } = req.body;
+
+  try {
+    let user = await User.findOne({ email });
+
+    if (user) {
+      return res.status(400).json({ msg: 'User already exists' });
+    }
+
+    user = new User({ email, password, name });
+
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(password, salt);
+
+    await user.save();
+
+    const payload = {
+      user: {
+        id: user.id,
+      },
+    };
+
+    jwt.sign(
+      payload,
+      process.env.JWT_SECRET,
+      { expiresIn: 360000 },
+      (err, token) => {
+        if (err) throw err;
+        res.json({ token });
+      }
+    );
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+// Login
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(400).json({ msg: 'Invalid credentials' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(400).json({ msg: 'Invalid credentials' });
+    }
+
+    const payload = {
+      user: {
+        id: user.id,
+      },
+    };
+
+    jwt.sign(
+      payload,
+      process.env.JWT_SECRET,
+      { expiresIn: 360000 },
+      (err, token) => {
+        if (err) throw err;
+        res.json({ token });
+      }
+    );
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server error');
+  }
+});
+
+module.exports = router;
+
+// trips.js
+const express = require('express');
+const passport = require('passport');
+const Trip = require('../models/Trip');
+const Location = require('../models/Location');
+
+const router = express.Router();
+
+// Get all trips
+router.get('/', async (req, res) => {
+  try {
+    const trips = await Trip.find().populate('locations');
+    res.json(trips);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// Get trip by ID
+router.get('/:id', async (req, res) => {
+  try {
+    const trip = await Trip.findById(req.params.id).populate('locations');
+
+    if (!trip) {
+      return res.status(404).json({ msg: 'Trip not found' });
+    }
+
+    res.json(trip);
+  } catch (err) {
+    console.error(err.message);
+    if (err.kind === 'ObjectId') {
+      return res.status(404).json({ msg: 'Trip not found' });
+    }
+    res.status(500).send('Server Error');
+  }
+});
+
+// Create a trip
+router.post(
+  '/',
+  passport.authenticate('jwt', { session: false }),
+  async (req, res) => {
+    const { title, description, startDate, endDate, locations, images, cost, rating } = req.body;
+
+    try {
+      const newTrip = new Trip({
+        title,
+        description,
+        user: req.user.id,
+        startDate,
+        endDate,
+        images,
+        cost,
+        rating,
+      });
+
+      const savedLocations = await Location.insertMany(locations);
+      newTrip.locations = savedLocations.map(loc => loc._id);
+
+      const trip = await newTrip.save();
+      res.json(trip);
+    } catch (err) {
+      console.error(err.message);
+      res.status(500).send('Server Error');
+    }
+  }
+);
+
+// Update a trip
+router.put(
+  '/:id',
+  passport.authenticate('jwt', { session: false }),
+  async (req, res) => {
+    const { title, description, startDate, endDate, locations, images, cost, rating } = req.body;
+
+    const tripFields = {};
+    if (title) tripFields.title = title;
+    if (description) tripFields.description = description;
+    if (startDate) tripFields.startDate = startDate;
+    if (endDate) tripFields.endDate = endDate;
+    if (images) tripFields.images = images;
+    if (cost) tripFields.cost = cost;
+    if (rating) tripFields.rating = rating;
+
+    try {
+      let trip = await Trip.findById(req.params.id);
+
+      if (!trip) {
+        return res.status(404).json({ msg: 'Trip not found' });
+      }
+
+      if (trip.user.toString() !== req.user.id) {
+        return res.status(401).json({ msg: 'Not authorized' });
+      }
+
+      if (locations) {
+        await Location.deleteMany({ _id: { $in: trip.locations } });
+        const savedLocations = await Location.insertMany(locations);
+        tripFields.locations = savedLocations.map(loc => loc._id);
+      }
+
+      trip = await Trip.findByIdAndUpdate(
+        req.params.id,
+        { $set: tripFields },
+        { new: true }
+      ).populate('locations');
+
+      res.json(trip);
+    } catch (err) {
+      console.error(err.message);
+      if (err.kind === 'ObjectId') {
+        return res.status(404).json({ msg: 'Trip not found' });
+      }
+      res.status(500).send('Server Error');
+    }
+  }
+);
+
+// Delete a trip
+router.delete(
+  '/:id',
+  passport.authenticate('jwt', { session: false }),
+  async (req, res) => {
+    try {
+      const trip = await Trip.findById(req.params.id);
+
+      if (!trip) {
+        return res.status(404).json({ msg: 'Trip not found' });
+      }
+
+      if (trip.user.toString() !== req.user.id) {
+        return res.status(401).json({ msg: 'Not authorized' });
+      }
+
+      await Location.deleteMany({ _id: { $in: trip.locations } });
+      await trip.remove();
+
+      res.json({ msg: 'Trip removed' });
+    } catch (err) {
+      console.error(err.message);
+      if (err.kind === 'ObjectId') {
+        return res.status(404).json({ msg: 'Trip not found' });
+      }
+      res.status(500).send('Server Error');
+    }
+  }
+);
+
+module.exports = router;
+// Home.js
+import React, { useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { getTrips } from '../redux/actions/trips';
+import TripCard from '../components/TripCard';
+import { Grid, Typography } from '@material-ui/core';
+
+const Home = () => {
+  const dispatch = useDispatch();
+  const trips = useSelector((state) => state.trips.trips);
+
+  useEffect(() => {
+    dispatch(getTrips());
+  }, [dispatch]);
+
+  return (
+    <Grid container spacing={2}>
+      <Grid item xs={12}>
+        <Typography variant="h4" align="center" gutterBottom>
+          Latest Trips
+        </Typography>
+      </Grid>
+      {trips.map((trip) => (
+        <Grid item key={trip._id} xs={12} sm={6} md={4}>
+          <TripCard trip={trip} />
+        </Grid>
+      ))}
+    </Grid>
+  );
+};
+
+export default Home;
+
+// Login.js
+import React, { useState } from 'react';
+import { useDispatch } from 'react-redux';
+import { loginUser } from '../redux/actions/auth';
+import { TextField, Button, Typography, Container } from '@material-ui/core';
+
+const Login = () => {
+  const [formData, setFormData] = useState({
+    email: '',
+    password: '',
+  });
+
+  const dispatch = useDispatch();
+
+  const { email, password } = formData;
+
+  const onChange = (e) =>
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+
+  const onSubmit = (e) => {
+    e.preventDefault();
+    dispatch(loginUser(email, password));
+  };
+
+  return (
+    <Container maxWidth="xs">
+      <Typography variant="h4" align="center" gutterBottom>
+        Login
+      </Typography>
+      <form onSubmit={onSubmit}>
+        <TextField
+          variant="outlined"
+          margin="normal"
+          required
+          fullWidth
+          label="Email Address"
+          name="email"
+          value={email}
+          onChange={onChange}
+        />
+        <TextField
+          variant="outlined"
+          margin="normal"
+          required
+          fullWidth
+          name="password"
+          label="Password"
+          type="password"
+          value={password}
+          onChange={onChange}
+        />
+        <Button type="submit" fullWidth variant="contained" color="primary">
+          Login
+        </Button>
+      </form>
+    </Container>
+  );
+};
+
+export default Login;
+
+// Register.js
+import React, { useState } from 'react';
+import { useDispatch } from 'react-redux';
+import { registerUser } from '../redux/actions/auth';
+import { TextField, Button, Typography, Container } from '@material-ui/core';
+
+const Register = () => {
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    password: '',
+  });
+
+  const dispatch = useDispatch();
+
+  const { name, email, password } = formData;
+
+  const onChange = (e) =>
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+
+  const onSubmit = (e) => {
+    e.preventDefault();
+    dispatch(registerUser(name, email, password));
+  };
+
+  return (
+    <Container maxWidth="xs">
+      <Typography variant="h4" align="center" gutterBottom>
+        Register
+      </Typography>
+      <form onSubmit={onSubmit}>
+        <TextField
+          variant="outlined"
+          margin="normal"
+          required
+          fullWidth
+          label="Name"
+          name="name"
+          value={name}
+          onChange={onChange}
+        />
+        <TextField
+          variant="outlined"
+          margin="normal"
+          required
+          fullWidth
+          label="Email Address"
+          name="email"
+          value={email}
+          onChange={onChange}
+        />
+        <TextField
+          variant="outlined"
+          margin="normal"
+          required
+          fullWidth
+          name="password"
+          label="Password"
+          type="password"
+          value={password}
+          onChange={onChange}
+        />
+        <Button type="submit" fullWidth variant="contained" color="primary">
+          Register
+        </Button>
+      </form>
+    </Container>
+  );
+};
+
+export default Register;
+
+// TripList.js
+import React, { useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { getTrips } from '../redux/actions/trips';
+import TripCard from '../components/TripCard';
+import { Grid, Typography } from '@material-ui/core';
+
+const TripList = () => {
+  const dispatch = useDispatch();
+  const trips = useSelector((state) => state.trips.trips);
+
+  useEffect(() => {
+    dispatch(getTrips());
+  }, [dispatch]);
+
+  return (
+    <Grid container spacing={2}>
+      <Grid item xs={12}>
+        <Typography variant="h4" align="center" gutterBottom>
+          All Trips
+        </Typography>
+      </Grid>
+      {trips.map((trip) => (
+        <Grid item key={trip._id} xs={12} sm={6} md={4}>
+          <TripCard trip={trip} />
+        </Grid>
+      ))}
+    </Grid>
+  );
+};
+
+export default TripList;
+
+// TripDetails.js
+import React, { useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { useParams } from 'react-router-dom';
+import { getTrip } from '../redux/actions/trips';
+import { Typography, Grid, Card, CardMedia, CardContent } from '@material-ui/core';
+import Map from '../components/Map';
+Details = () => {
+const dispatch = useDispatch();
+const trip = useSelector((state) => state.trips.trip);
+const { id } = useParams();
+useEffect(() => {
+dispatch(getTrip(id));
+}, [dispatch, id]);
+return (
+<Grid container spacing={2}>
+<Grid item xs={12}>
+<Typography variant="h4" align="center" gutterBottom>
+{trip.title}
+</Typography>
+</Grid>
+<Grid item xs={12} md={6}>
+<Card>
+<CardMedia
+         component="img"
+         alt={trip.title}
+         height="400"
+         image={trip.images[0]?.url}
+       />
+<CardContent>
+<Typography variant="h5" component="h2">
+{trip.title}
+</Typography>
+<Typography variant="body2" color="textSecondary" component="p">
+{trip.description}
+</Typography>
+<Typography variant="body2" color="textSecondary">
+Cost: ${trip.cost}
+</Typography>
+<Typography variant="body2" color="textSecondary">
+Rating: {trip.rating}
+</Typography>
+</CardContent>
+</Card>
+</Grid>
+<Grid item xs={12} md={6}>
+<Map locations={trip.locations} />
+</Grid>
+</Grid>
+);
+};
+export default TripDetails;
+// AddTrip.js
+import React, { useState } from 'react';
+import { useDispatch } from 'react-redux';
+import { createTrip } from '../redux/actions/trips';
+import TripForm from '../components/TripForm';
+import { Typography, Container } from '@material-ui/core';
+const AddTrip = () => {
+const [formData, setFormData] = useState({
+title: '',
+description: '',
+startDate: '',
+endDate: '',
+locations: [],
+images: [],
+cost: '',
+rating: '',
+});
+const dispatch = useDispatch();
+const onSubmit = (e) => {
+e.preventDefault();
+dispatch(createTrip(formData));
+};
+return (
+<Container maxWidth="sm">
+<Typography variant="h4" align="center" gutterBottom>
+Add New Trip
+</Typography>
+<TripForm formData={formData} setFormData={setFormData} onSubmit={onSubmit} />
+</Container>
+);
+};
+export default AddTrip;
+Copy
+Компоненты (components/):
+
+```javascript
+// Header.js
+import React from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import { Link } from 'react-router-dom';
+import { logout } from '../redux/actions/auth';
+import { AppBar, Toolbar, Typography, Button } from '@material-ui/core';
+
+const Header = () => {
+  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+  const dispatch = useDispatch();
+
+  const onLogout = () => {
+    dispatch(logout());
+  };
+
+  const authLinks = (
+    <>
+      <Button component={Link} to="/trips" color="inherit">
+        Trips
+      </Button>
+      <Button component={Link} to="/trips/add" color="inherit">
+        Add Trip
+      </Button>
+      <Button onClick={onLogout} color="inherit">
+        Logout
+      </Button>
+    </>
+  );
+
+  const guestLinks = (
+    <>
+      <Button component={Link} to="/login" color="inherit">
+        Login
+      </Button>
+      <Button component={Link} to="/register" color="inherit">
+        Register
+      </Button>
+    </>
+  );
+
+  return (
+    <AppBar position="static">
+      <Toolbar>
+        <Typography variant="h6" style={{ flexGrow: 1 }}>
+          Travel Diary
+        </Typography>
+        {isAuthenticated ? authLinks : guestLinks}
+      </Toolbar>
+    </AppBar>
+  );
+};
+
+export default Header;
+
+// Footer.js
+import React from 'react';
+import { Typography, Container } from '@material-ui/core';
+
+const Footer = () => {
+  return (
+    <Container maxWidth="md" style={{ marginTop: '2rem', textAlign: 'center' }}>
+      <Typography variant="body2" color="textSecondary">
+        &copy; {new Date().getFullYear()} Travel Diary. All rights reserved.
+      </Typography>
+    </Container>
+  );
+};
+
+export default Footer;
+
+// TripCard.js
+import React from 'react';
+import { Link } from 'react-router-dom';
+import { Card, CardActionArea, CardMedia, CardContent, Typography } from '@material-ui/core';
+
+const TripCard = ({ trip }) => {
+  return (
+    <Card>
+      <CardActionArea component={Link} to={`/trips/${trip._id}`}>
+        <CardMedia
+          component="img"
+          alt={trip.title}
+          height="200"
+          image={trip.images[0]?.url}
+        />
+        <CardContent>
+          <Typography gutterBottom variant="h5" component="h2">
+            {trip.title}
+          </Typography>
+          <Typography variant="body2" color="textSecondary" component="p">
+            {trip.description}
+          </Typography>
+        </CardContent>
+      </CardActionArea>
+    </Card>
+  );
+};
+
+export default TripCard;
+
+// TripForm.js
+import React from 'react';
+import { TextField, Button } from '@material-ui/core';
+
+const TripForm = ({ formData, setFormData, onSubmit }) => {
+  const { title, description, startDate, endDate, cost, rating } = formData;
+
+  const onChange = (e) =>
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+
+  return (
+    <form onSubmit={onSubmit}>
+      <TextField
+        variant="outlined"
+        margin="normal"
+        required
+        fullWidth
+        label="Title"
+        name="title"
+        value={title}
+        onChange={onChange}
+      />
+      <TextField
+        variant="outlined"
+        margin="normal"
+        required
+        fullWidth
+        label="Description"
+        name="description"
+        value={description}
+        onChange={onChange}
+        multiline
+        rows={4}
+      />
+      <TextField
+        variant="outlined"
+        margin="normal"
+        required
+        fullWidth
+        label="Start Date"
+        name="startDate"
+        type="date"
+        value={startDate}
+        onChange={onChange}
+        InputLabelProps={{
+          shrink: true,
+        }}
+      />
+      <TextField
+        variant="outlined"
+        margin="normal"
+        required
+        fullWidth
+        label="End Date"
+        name="endDate"
+        type="date"
+        value={endDate}
+        onChange={onChange}
+        InputLabelProps={{
+          shrink: true,
+        }}
+      />
+      <TextField
+        variant="outlined"
+        margin="normal"
+        required
+        fullWidth
+        label="Cost"
+        name="cost"
+        type="number"
+        value={cost}
+        onChange={onChange}
+      />
+      <TextField
+        variant="outlined"
+        margin="normal"
+        required
+        fullWidth
+        label="Rating"
+        name="rating"
+        type="number"
+        value={rating}
+        onChange={onChange}
+      />
+      <Button type="submit" fullWidth variant="contained" color="primary">
+        Submit
+      </Button>
+    </form>
+  );
+};
+
+export default TripForm;
+
+// Map.js
+import React from 'react';
+import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+
+const Map = ({ locations }) => {
+  const center = locations[0]?.coordinates;
+
+  return (
+    <MapContainer center={center} zoom={5} style={{ height: '400px' }}>
+      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+      {locations.map((loc) => (
+        <Marker key={loc._id} position={loc.coordinates}>
+          <Popup>
+            <div>
+              <h3>{loc.name}</h3>
+              <p>{loc.description}</p>
+            </div>
+          </Popup>
+        </Marker>
+      ))}
+    </MapContainer>
+  );
+};
+
+export default Map;
+// useAuth.js
+import { useState, useEffect } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import { loadUser } from '../redux/actions/auth';
+
+const useAuth = () => {
+  const [isLoading, setIsLoading] = useState(true);
+  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+  const dispatch = useDispatch();
+
+  useEffect(() => {
+    dispatch(loadUser());
+    setIsLoading(false);
+  }, [dispatch]);
+
+  return { isLoading, isAuthenticated };
+};
+
+export default useAuth;
+
+// useTrips.js
+import { useEffect } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import { getTrips } from '../redux/actions/trips';
+
+const useTrips = () => {
+  const trips = useSelector((state) => state.trips.trips);
+  const dispatch = useDispatch();
+
+  useEffect(() => {
+    dispatch(getTrips());
+  }, [dispatch]);
+
+  return trips;
+};
+
+export default useTrips;
+javascriptCopy// api.js
+import axios from 'axios';
+
+const setAuthToken = (token) => {
+  if (token) {
+    axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+  } else {
+    delete axios.defaults.headers.common['Authorization'];
+  }
+};
+
+export default setAuthToken;
+
+// geolocation.js
+const getLocation = () => {
+  return new Promise((resolve, reject) => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(resolve, reject);
+    } else {
+      reject('Geolocation is not supported by this browser.');
+    }
+  });
+};
+
+export { getLocation };
+
+// tripStorage.js
+const STORAGE_KEY = 'tripDiary';
+
+const getTripFromStorage = () => {
+  const trip = localStorage.getItem(STORAGE_KEY);
+  return trip ? JSON.parse(trip) : null;
+};
+
+const setTripToStorage = (trip) => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(trip));
+};
+
+const removeTripFromStorage = () => {
+  localStorage.removeItem(STORAGE_KEY);
+};
+
+export { getTripFromStorage, setTripToStorage, removeTripFromStorage };
